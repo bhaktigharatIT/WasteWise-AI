@@ -1,31 +1,21 @@
 {
-  "name": "webapp",
+  "name": "wastewise-ai",
+  "version": "1.0.0",
+  "private": true,
   "type": "module",
+  "description": "WasteWise AI — Don't Throw It. Ask AI. AI-powered second-life recommendations for unwanted items.",
+  "main": "server/index.mjs",
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "scripts": {
-    "dev": "vite",
-    "dev:sandbox": "wrangler pages dev dist --ip 0.0.0.0 --port 3000",
-    "dev:d1": "wrangler pages dev dist --d1=webapp-production --local --ip 0.0.0.0 --port 3000",
-    "build": "vite build",
-    "preview": "wrangler pages dev dist",
-    "deploy": "npm run build && wrangler pages deploy dist",
-    "cf-typegen": "wrangler types --env-interface CloudflareBindings",
-    "clean-port": "fuser -k 3000/tcp 2>/dev/null || true",
-    "test": "curl http://localhost:3000/api/health",
-    "db:migrate:local": "wrangler d1 migrations apply webapp-production --local",
-    "db:migrate:prod": "wrangler d1 migrations apply webapp-production",
-    "db:console:local": "wrangler d1 execute webapp-production --local",
-    "db:console:prod": "wrangler d1 execute webapp-production",
-    "git:commit": "git add . && git commit",
-    "git:status": "git status",
-    "git:log": "git log --oneline"
+    "start": "node server/index.mjs",
+    "dev": "node --watch server/index.mjs",
+    "reset-db": "node server/reset.mjs"
   },
   "dependencies": {
-    "hono": "^4.13.8"
-  },
-  "devDependencies": {
-    "@hono/vite-build": "^1.11.1",
-    "@hono/vite-dev-server": "^0.26.1",
-    "vite": "^8.1.4",
-    "wrangler": "^4.110.0"
+    "@hono/node-server": "^1.14.0",
+    "better-sqlite3": "^11.5.0",
+    "hono": "^4.6.14"
   }
 }

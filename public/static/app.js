@@ -67,14 +67,37 @@
   const pct = (n, d) => (!d ? 0 : Math.round((n / d) * 100))
 
   async function api(path, opts) {
-    const res = await fetch(path, Object.assign({ headers: { 'Content-Type': 'application/json' } }, opts))
-    if (!res.ok) throw new Error('Request failed: ' + res.status)
-    return res.json()
+    const res = await fetch(
+      path,
+      Object.assign({ credentials: 'same-origin', headers: { 'Content-Type': 'application/json' } }, opts)
+    )
+    let data = null
+    try { data = await res.json() } catch (e) { data = null }
+
+    if (res.status === 401) {
+      const err = new Error('UNAUTHORIZED')
+      err.code = 'UNAUTHORIZED'
+      err.data = data
+      throw err
+    }
+    if (!res.ok) {
+      const msg =
+        (data && (data.error || (data.errors && Object.values(data.errors)[0]))) ||
+        'Request failed (' + res.status + ')'
+      const err = new Error(msg)
+      err.code = 'HTTP_' + res.status
+      err.data = data
+      throw err
+    }
+    return data
   }
 
   /* ------------------------------------------------------------ app state */
 
   const state = {
+    user: null,
+    history: [],
+    campus: null,
     samples: FALLBACK_SAMPLES,
     samplesLoaded: false,
     scan: { itemId: null, fileName: null, preview: null, describe: '' },
@@ -88,60 +111,113 @@
   }
 
   /* ------------------------------------------------------------- storage */
+  /* History lives in the server-side SQLite database, scoped to the signed-in
+     account. It is mirrored in memory so view functions can read it
+     synchronously while the network call happens in the background. */
 
   const store = {
-    key: 'ww-history-v1',
-    read() {
+    all() {
+      return state.history || []
+    },
+
+    async load() {
       try {
-        const raw = localStorage.getItem(this.key)
-        if (!raw) return null
-        const arr = JSON.parse(raw)
-        return Array.isArray(arr) ? arr : null
+        const data = await api('/api/history')
+        state.history = (data.events || []).map(normalizeEvent)
       } catch (e) {
-        return null
+        if (e.code === 'UNAUTHORIZED') return handleUnauthorized()
+        state.history = []
+      }
+      return state.history
+    },
+
+    async add(ev) {
+      const optimistic = Object.assign({}, ev, { id: 'tmp-' + uid(), pending: true })
+      state.history = [optimistic].concat(state.history)
+      try {
+        const data = await api('/api/history', {
+          method: 'POST',
+          body: JSON.stringify({
+            itemLabel: ev.itemLabel,
+            category: ev.category,
+            pathway: ev.pathway,
+            action: ev.action,
+            confidence: ev.confidence,
+            mode: ev.mode,
+            createdAt: ev.createdAt,
+            answers: ev.answers,
+          }),
+        })
+        optimistic.id = data.id
+        optimistic.pending = false
+        return optimistic
+      } catch (e) {
+        if (e.code === 'UNAUTHORIZED') handleUnauthorized()
+        optimistic.pending = false
+        optimistic.failed = true
+        return optimistic
       }
     },
-    write(arr) {
+
+    async remove(id) {
+      state.history = state.history.filter((e) => String(e.id) !== String(id))
       try {
-        localStorage.setItem(this.key, JSON.stringify(arr.slice(0, 300)))
-      } catch (e) {}
+        await api('/api/history/' + encodeURIComponent(id), { method: 'DELETE' })
+      } catch (e) {
+        if (e.code === 'UNAUTHORIZED') handleUnauthorized()
+      }
     },
-    seed() {
-      const now = Date.now()
-      const events = DEMO_HISTORY_SEED.map((h, i) => ({
-        id: 'seed-' + i,
-        itemLabel: h.itemLabel,
-        category: h.category,
-        pathway: h.pathway,
-        action: h.action,
-        confidence: null,
-        createdAt: new Date(now - h.daysAgo * 86400000).toISOString(),
-        demo: true,
-        seed: true,
-      }))
-      this.write(events)
-      return events
+
+    async clear() {
+      state.history = []
+      try {
+        await api('/api/history', { method: 'DELETE' })
+      } catch (e) {
+        if (e.code === 'UNAUTHORIZED') handleUnauthorized()
+      }
     },
-    init() {
-      let arr = this.read()
-      if (!arr) arr = this.seed()
-      return arr
+
+    /** Populate the signed-in account with 12 demo records. */
+    async seed() {
+      for (const h of DEMO_HISTORY_SEED) {
+        const when = new Date(Date.now() - h.daysAgo * 86400000)
+        const stamp = when.toISOString().slice(0, 19).replace('T', ' ')
+        try {
+          await api('/api/history', {
+            method: 'POST',
+            body: JSON.stringify({
+              itemLabel: h.itemLabel,
+              category: h.category,
+              pathway: h.pathway,
+              action: h.action,
+              mode: 'demo-seed',
+              createdAt: stamp,
+            }),
+          })
+        } catch (e) {
+          if (e.code === 'UNAUTHORIZED') return handleUnauthorized()
+          break
+        }
+      }
+      await this.load()
+      return state.history
     },
-    all() {
-      return this.read() || []
-    },
-    add(ev) {
-      const arr = this.all()
-      arr.unshift(ev)
-      this.write(arr)
-      return ev
-    },
-    remove(id) {
-      this.write(this.all().filter((e) => String(e.id) !== String(id)))
-    },
-    clear() {
-      this.write([])
-    },
+  }
+
+  /** Map a database row onto the shape the views expect. */
+  function normalizeEvent(r) {
+    const raw = r.created_at ? String(r.created_at) : ''
+    const iso = raw ? new Date(raw.replace(' ', 'T') + (raw.endsWith('Z') ? '' : 'Z')).toISOString() : new Date().toISOString()
+    return {
+      id: r.id,
+      itemLabel: r.item_label,
+      category: r.category,
+      pathway: r.pathway,
+      action: r.action,
+      confidence: r.confidence,
+      createdAt: iso,
+      demo: r.mode === 'demo-seed' || r.mode === 'demo',
+    }
   }
 
   /* ------------------------------------------------------------- sidebar */
@@ -1174,35 +1250,283 @@
     }
   }
 
-  async function loadRemoteHistory() {
-    try {
-      const data = await api('/api/history')
-      if (!data || !data.ok || !Array.isArray(data.events)) return
-      const local = store.all()
-      const localIds = new Set(local.map((e) => String(e.id)))
-      const merged = local.slice()
-      // Only surface remote events that are not already present locally
-      data.events.forEach((r) => {
-        const id = 'd1-' + r.id
-        if (!localIds.has(id)) {
-          merged.push({
-            id,
-            itemLabel: r.item_label,
-            category: r.category,
-            pathway: r.pathway,
-            action: r.action,
-            confidence: r.confidence,
-            createdAt: r.created_at ? new Date(r.created_at + 'Z').toISOString() : new Date().toISOString(),
-            demo: false,
-            remote: true,
-          })
-        }
-      })
-      merged.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
-      store.write(merged)
-    } catch (e) {
-      /* offline-safe */
+  /* ============================================================ AUTH UI */
+
+  function authMark(mode) {
+    return `
+    <div class="auth-screen">
+      <div class="auth-visual">
+        <div class="auth-visual-inner">
+          <span class="auth-logo"><i class="fas fa-recycle"></i></span>
+          <h1>WasteWise AI</h1>
+          <p class="auth-tag">Don't Throw It. Ask AI.</p>
+          <p class="auth-sub">Turn unwanted items into opportunities for reuse, repair, donation and responsible recycling.</p>
+          <div class="auth-ladder">
+            ${LADDER.map((s) => `<span class="auth-step" style="--accent:${s.accent}"><i class="${s.icon}"></i>${esc(s.label)}</span>`).join('')}
+          </div>
+          <ul class="auth-points">
+            <li><i class="fas fa-circle-check"></i> Create your own free account</li>
+            <li><i class="fas fa-circle-check"></i> Your waste history, saved privately</li>
+            <li><i class="fas fa-circle-check"></i> Personal impact dashboard</li>
+            <li><i class="fas fa-circle-check"></i> Works offline — no API keys needed</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="auth-panel">
+        <div class="auth-card">
+          <div class="auth-tabs" role="tablist">
+            <button class="auth-tab${mode === 'login' ? ' active' : ''}" type="button" data-auth-tab="login" role="tab">Sign in</button>
+            <button class="auth-tab${mode === 'signup' ? ' active' : ''}" type="button" data-auth-tab="signup" role="tab">Create account</button>
+          </div>
+
+          ${mode === 'login' ? loginFormHTML() : signupFormHTML()}
+
+          <p class="auth-foot">
+            <i class="fas fa-shield-halved"></i>
+            Local demo app — accounts are stored in a SQLite file on this computer only.
+          </p>
+        </div>
+        <button class="btn btn-ghost btn-sm" type="button" id="auth-theme" style="margin-top:14px;align-self:center">
+          <i class="fas fa-moon"></i> Toggle dark mode
+        </button>
+      </div>
+    </div>`
+  }
+
+  function loginFormHTML(prefillEmail) {
+    return `
+    <form id="login-form" class="auth-form" novalidate>
+      <h2>Welcome back</h2>
+      <p class="auth-form-sub">Sign in to continue to your waste dashboard.</p>
+
+      <label class="field">
+        <span>Email address</span>
+        <input type="email" name="email" id="login-email" autocomplete="email" placeholder="you@example.com" value="${esc(prefillEmail || '')}" required />
+        <small class="field-error" data-error-for="email"></small>
+      </label>
+
+      <label class="field">
+        <span>Password</span>
+        <input type="password" name="password" id="login-password" autocomplete="current-password" placeholder="Your password" required />
+        <small class="field-error" data-error-for="password"></small>
+      </label>
+
+      <div class="auth-alert" id="login-alert" hidden></div>
+
+      <button class="btn btn-primary btn-lg btn-block" type="submit" id="login-submit">
+        <i class="fas fa-arrow-right-to-bracket"></i> Sign in
+      </button>
+
+      <p class="auth-switch">
+        New here? <button type="button" class="link-btn" data-auth-tab="signup">Create an account</button>
+      </p>
+    </form>`
+  }
+
+  function signupFormHTML() {
+    return `
+    <form id="signup-form" class="auth-form" novalidate>
+      <h2>Create your account</h2>
+      <p class="auth-form-sub">Free forever. Takes about ten seconds.</p>
+
+      <label class="field">
+        <span>Full name</span>
+        <input type="text" name="name" id="signup-name" autocomplete="name" placeholder="Alex Kumar" required />
+        <small class="field-error" data-error-for="name"></small>
+      </label>
+
+      <label class="field">
+        <span>Email address</span>
+        <input type="email" name="email" id="signup-email" autocomplete="email" placeholder="you@example.com" required />
+        <small class="field-error" data-error-for="email"></small>
+      </label>
+
+      <div class="field-row">
+        <label class="field">
+          <span>Password</span>
+          <input type="password" name="password" id="signup-password" autocomplete="new-password" placeholder="At least 8 characters" required />
+          <small class="field-error" data-error-for="password"></small>
+        </label>
+        <label class="field">
+          <span>Confirm password</span>
+          <input type="password" name="confirm" id="signup-confirm" autocomplete="new-password" placeholder="Repeat password" required />
+          <small class="field-error" data-error-for="confirm"></small>
+        </label>
+      </div>
+
+      <div class="auth-alert" id="signup-alert" hidden></div>
+
+      <button class="btn btn-primary btn-lg btn-block" type="submit" id="signup-submit">
+        <i class="fas fa-user-plus"></i> Create my account
+      </button>
+
+      <p class="auth-switch">
+        Already have an account? <button type="button" class="link-btn" data-auth-tab="login">Sign in</button>
+      </p>
+    </form>`
+  }
+
+  function showAuthMessage(formId, message, kind) {
+    const el = $('#' + formId + '-alert')
+    if (!el) return
+    el.className = 'auth-alert ' + (kind === 'error' ? 'is-error' : 'is-ok')
+    el.innerHTML = `<i class="fas ${kind === 'error' ? 'fa-circle-exclamation' : 'fa-circle-check'}"></i><span>${esc(message)}</span>`
+    el.hidden = false
+  }
+
+  function clearFieldErrors(form) {
+    $$('.field-error', form).forEach((el) => { el.textContent = '' })
+    $$('.field', form).forEach((el) => el.classList.remove('has-error'))
+    const alert = $('.auth-alert', form)
+    if (alert) alert.hidden = true
+  }
+
+  function showFieldErrors(form, errors) {
+    Object.entries(errors || {}).forEach(([key, msg]) => {
+      const err = $('[data-error-for="' + key + '"]', form)
+      if (err) {
+        err.textContent = msg
+        const field = err.closest('.field')
+        if (field) field.classList.add('has-error')
+      }
+    })
+  }
+
+  let authMode = 'signup'
+
+  function renderAuth(mode) {
+    authMode = mode || authMode
+    const root = $('#auth-root')
+    const shell = $('#app-shell')
+    if (!root) return
+    root.innerHTML = authMark(authMode)
+    root.hidden = false
+    if (shell) shell.hidden = true
+    document.body.classList.remove('booting')
+    updateAuthThemeIcon()
+    setTimeout(() => {
+      const first = root.querySelector('input')
+      if (first) first.focus()
+    }, 80)
+  }
+
+  function showApp() {
+    const root = $('#auth-root')
+    const shell = $('#app-shell')
+    if (root) { root.hidden = true; root.innerHTML = '' }
+    if (shell) shell.hidden = false
+    document.body.classList.remove('booting')
+    updateProfileChip()
+  }
+
+  function updateProfileChip() {
+    const u = state.user
+    const initials = u ? (u.name || '?').trim().split(/\s+/).map((p) => p[0]).slice(0, 2).join('').toUpperCase() : '?'
+    const av = $('#profile-avatar')
+    const nm = $('#profile-name')
+    const em = $('#profile-email')
+    if (av) av.textContent = initials
+    if (nm) nm.textContent = u ? u.name : 'Account'
+    if (em) em.textContent = u ? u.email : '—'
+    const chip = $('#profile-chip')
+    if (chip) chip.title = u ? `${u.name} · ${u.email}` : 'Your profile'
+  }
+
+  function updateAuthThemeIcon() {
+    const btn = $('#auth-theme')
+    if (!btn) return
+    const dark = document.documentElement.getAttribute('data-theme') === 'dark'
+    btn.innerHTML = `<i class="fas ${dark ? 'fa-sun' : 'fa-moon'}"></i> Toggle dark mode`
+  }
+
+  let loggingOut = false
+
+  /** Session expired / not signed in: return to the auth screen. */
+  function handleUnauthorized() {
+    if (loggingOut) return
+    state.user = null
+    state.history = []
+    authMode = 'login'
+    renderAuth('login')
+    const el = $('#login-alert')
+    if (el) {
+      el.className = 'auth-alert is-error'
+      el.innerHTML = '<i class="fas fa-circle-exclamation"></i><span>Your session expired. Please sign in again.</span>'
+      el.hidden = false
     }
+  }
+
+  async function doSignup(form) {
+    clearFieldErrors(form)
+    const body = {
+      name: $('#signup-name').value,
+      email: $('#signup-email').value,
+      password: $('#signup-password').value,
+      confirm: $('#signup-confirm').value,
+    }
+    const btn = $('#signup-submit')
+    const original = btn.innerHTML
+    btn.disabled = true
+    btn.innerHTML = '<span class="spinner spinner-sm"></span> Creating your account…'
+    try {
+      const data = await api('/api/auth/signup', { method: 'POST', body: JSON.stringify(body) })
+      state.user = data.user
+      await afterAuth()
+      toast(`Welcome to WasteWise AI, ${data.user.name.split(' ')[0]}!`)
+    } catch (e) {
+      if (e.data && e.data.errors) showFieldErrors(form, e.data.errors)
+      else showAuthMessage('signup', e.message || 'Could not create your account.', 'error')
+    } finally {
+      btn.disabled = false
+      btn.innerHTML = original
+    }
+  }
+
+  async function doLogin(form) {
+    clearFieldErrors(form)
+    const body = { email: $('#login-email').value, password: $('#login-password').value }
+    const btn = $('#login-submit')
+    const original = btn.innerHTML
+    btn.disabled = true
+    btn.innerHTML = '<span class="spinner spinner-sm"></span> Signing in…'
+    try {
+      const data = await api('/api/auth/login', { method: 'POST', body: JSON.stringify(body) })
+      state.user = data.user
+      await afterAuth()
+      toast(`Signed in as ${data.user.name}`)
+    } catch (e) {
+      if (e.data && e.data.errors) showFieldErrors(form, e.data.errors)
+      else showAuthMessage('login', e.message || 'Incorrect email or password.', 'error')
+    } finally {
+      btn.disabled = false
+      btn.innerHTML = original
+    }
+  }
+
+  async function doLogout() {
+    loggingOut = true
+    try { await api('/api/auth/logout', { method: 'POST' }) } catch (e) { /* ignore */ }
+    state.user = null
+    state.history = []
+    state.analysis = null
+    state.rec = null
+    state.answers = {}
+    state.lastAction = null
+    state.scan = { itemId: null, fileName: null, preview: null, describe: '' }
+    if (location.hash) location.hash = '#/'
+    setTimeout(() => { loggingOut = false }, 200)
+    renderAuth('login')
+    toast('You have been signed out')
+  }
+
+  /** Load per-account data and reveal the app. */
+  async function afterAuth() {
+    showApp()
+    updateProfileChip()
+    await Promise.all([loadSamples(), loadCampus()])
+    await store.load()
+    route()
   }
 
   function pickSample(id) {
@@ -1428,6 +1752,7 @@
     }
     if (!rec || !rec.ok) rec = localRecommendFallback(a, state.answers)
     state.rec = rec
+    if (location.hash.indexOf('/plan') < 0) location.hash = '#/plan'
     route()
     toast(`Recommended pathway: ${rec.title} (${rec.confidence}% confidence)`)
   }
@@ -1469,28 +1794,20 @@
     if (!a) return
     const meta = ACTION_LABELS[pathway] || ACTION_LABELS.reuse
     const ev = {
-      id: uid(),
       itemLabel: a.detectedItem,
       category: a.category,
       pathway,
       action: meta.action,
       confidence: rec ? rec.confidence : a.confidence,
-      createdAt: new Date().toISOString(),
-      demo: false,
+      mode: 'demo',
+      answers: state.answers,
     }
-    store.add(ev)
     state.lastAction = `${meta.action} — ${a.detectedItem}`
-    try {
-      await api('/api/history', {
-        method: 'POST',
-        body: JSON.stringify({
-          itemLabel: ev.itemLabel, category: ev.category, pathway, action: ev.action,
-          confidence: ev.confidence, mode: 'demo', answers: state.answers,
-        }),
-      })
-    } catch (e) { /* local-only is fine */ }
     route()
     toast(`Saved to your history: ${meta.action}`)
+    const saved = await store.add(ev)
+    // keep the plan screen's saved-confirmation in sync once the row lands
+    if (saved && location.hash.indexOf('/plan') >= 0) route()
   }
 
   async function submitChallenge(form) {
@@ -1499,9 +1816,11 @@
     const goal = parseInt(($('#ch-goal') && $('#ch-goal').value) || '500', 10)
     try {
       await api('/api/challenge', { method: 'POST', body: JSON.stringify({ org, contact, goal }) })
-    } catch (e) {}
-    try { localStorage.setItem('ww-challenge', JSON.stringify({ org, contact, goal, at: new Date().toISOString() })) } catch (e) {}
-    toast(`Campus Circularity Challenge started for ${org} 🎉`)
+      toast(`Campus Circularity Challenge started for ${org}`)
+    } catch (e) {
+      if (e.code === 'UNAUTHORIZED') return handleUnauthorized()
+      toast('Could not register the challenge — please try again.', 'error')
+    }
     form.reset()
   }
 
@@ -1575,26 +1894,53 @@
 
     if (closest('#plan-skip')) { toast('No outcome recorded — you can still see the plan later from History'); return }
 
-    if (closest('#seed-history')) { store.seed(); route(); toast('Demo history loaded (12 records)'); return }
-    if (closest('#sidebar-demo-seed')) { store.seed(); route(); toast('Demo history loaded (12 records)'); return }
+    if (closest('#seed-history') || closest('#sidebar-demo-seed')) {
+      seedDemoHistory()
+      return
+    }
 
-    if (closest('#clear-history')) { store.clear(); route(); toast('Waste history cleared'); return }
+    if (closest('#clear-history')) { clearHistory(); return }
 
     const del = closest('[data-del-history]')
     if (del) {
       const id = del.getAttribute('data-del-history')
-      store.remove(id)
-      try { if (String(id).indexOf('d1-') === 0) api('/api/history/' + String(id).slice(3), { method: 'DELETE' }) } catch (err) {}
-      route()
-      toast('Record deleted')
+      store.remove(id).then(() => { route(); toast('Record deleted') })
       return
     }
+
+    // auth tabs / logout
+    const authTab = closest('[data-auth-tab]')
+    if (authTab) { renderAuth(authTab.getAttribute('data-auth-tab')); return }
+    if (closest('#logout-btn') || closest('#logout-btn-sidebar')) { doLogout(); return }
+    if (closest('#auth-theme')) { toggleTheme(); updateAuthThemeIcon(); return }
   })
 
+  async function seedDemoHistory() {
+    toast('Loading demo history…')
+    await store.seed()
+    route()
+    toast('Demo history loaded (12 records)')
+  }
+
+  async function clearHistory() {
+    await store.clear()
+    route()
+    toast('Waste history cleared (only your account)')
+  }
+
   document.addEventListener('submit', (e) => {
-    if (e.target && e.target.id === 'challenge-form') {
+    if (!e.target) return
+    if (e.target.id === 'challenge-form') {
       e.preventDefault()
       submitChallenge(e.target)
+    }
+    if (e.target.id === 'signup-form') {
+      e.preventDefault()
+      doSignup(e.target)
+    }
+    if (e.target.id === 'login-form') {
+      e.preventDefault()
+      doLogin(e.target)
     }
   })
 
@@ -1720,12 +2066,26 @@
   /* ------------------------------------------------------------ app boot */
 
   async function boot() {
-    store.init()
     updateThemeIcon()
-    await Promise.all([loadSamples(), loadCampus()])
-    loadRemoteHistory().then(() => { if (location.hash.indexOf('/impact') >= 0) route() })
     window.addEventListener('hashchange', route)
-    route()
+
+    // Who is signed in? The session lives in an httpOnly cookie.
+    let me = null
+    try {
+      const data = await api('/api/auth/me')
+      me = data ? data.user : null
+    } catch (e) {
+      me = null
+    }
+
+    if (!me) {
+      renderAuth('signup')
+      state.booted = true
+      return
+    }
+
+    state.user = me
+    await afterAuth()
     state.booted = true
   }
 

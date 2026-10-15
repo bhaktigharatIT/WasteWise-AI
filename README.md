@@ -10,44 +10,186 @@ It does not stop at waste *classification*. Its **Second-Life Engine** recommend
 REUSE → REPAIR → DONATE → REPURPOSE → RECYCLE → SAFE DISPOSAL — and only falls back to disposal
 when reuse, repair, donation and repurposing are genuinely unsuitable.
 
+**Runs entirely on your own laptop.** No Cloudflare account, no API keys, no cloud services.
+Just Node.js and a local SQLite file.
+
 ---
 
-## Live Preview
+## Quick start (2 commands)
 
-- **Sandbox preview**: `https://3000-<sandbox-id>.sandbox.novita.ai`
-- **Health check**: `/api/health`
-- **Local dev**: `http://localhost:3000`
+```bash
+npm install
+npm start
+```
 
-## Public URLs
+Then open **<http://localhost:3000>** in your browser.
 
-| Route | Purpose |
-|-------|---------|
-| `/` | Home / landing dashboard |
-| `#/scan` | Scan Item (upload, drag & drop, describe, demo samples) |
-| `#/analysis` | AI Analysis (detected item, category, condition, confidence, safety) |
-| `#/secondlife` | Second-Life Engine (contextual questions + live pathway) |
-| `#/plan` | Action Plan (recommended action, why, next steps, safety, alternative) |
-| `#/impact` | My Impact dashboard (charts + behaviour-based impact) |
-| `#/campus` | WasteWise Campus Challenge (community + leaderboard) |
-| `#/history` | Full waste history with delete |
+👉 New to this? Read **[START-HERE.md](START-HERE.md)** — a beginner-friendly,
+click-by-click VS Code guide.
 
-## API Endpoints
+**Requirements:** Node.js 18+ (20 or 22 recommended).
+
+---
+
+## Everyone gets their own account
+
+The app has **real user accounts**:
+
+- **Create account** — name, email, password (8+ chars, confirm field)
+- **Sign in / Sign out** — sessions last 30 days
+- Passwords hashed with **scrypt** + per-user salt (never stored in plain text)
+- Sessions are opaque random tokens in an httpOnly cookie
+- **Per-user data isolation** — each account only ever sees its own history
+- Two accounts on the same laptop never see each other's data
+
+No email verification or password reset — this is a hackathon demo, deliberately kept simple.
+
+---
+
+## Test accounts
+
+The database starts **empty** and is created automatically on first run
+(`data/wastewise.db`). Sign up with any email you like — for example:
+
+| Name | Email | Password |
+|---|---|---|
+| Alex Kumar | `alex@example.com` | `supersecret123` |
+| Priya Sharma | `priya@example.com` | `mypassword456` |
+
+Or just invent your own. To wipe everything and start fresh: `npm run reset-db`.
+
+---
+
+## The 8 screens
+
+| Screen | Purpose |
+|---|---|
+| **Home** | Hero, tagline, both CTAs, the second-life ladder, Problem → Solution → Innovation |
+| **Scan Item** | Image upload, drag & drop, describe-by-text, 6 demo sample items |
+| **AI Analysis** | Detected item, waste category, visible condition, confidence ring, safety warning, 4 action cards |
+| **Second-Life Engine** | 2–4 contextual questions per category; recommended pathway updates **live** |
+| **Action Plan** | "Your best next step" — why / next steps / safety / alternative + record the outcome |
+| **My Impact** | Stat cards, doughnut + bar charts, waste journey timeline, behaviour-based impact |
+| **Campus Challenge** | Participation metrics, team leaderboard, challenge sign-up form |
+| **History** | Every analysed item and recorded decision, with delete |
+
+---
+
+## Demo Mode (always works, offline)
+
+DeMo Mode uses curated sample analyses so a presentation can never fail on a
+network hiccup. Six demo items, each producing a **different** intelligent result:
+
+| Demo item | Category | Typical outcome |
+|---|---|---|
+| **Old Laptop** | E-waste | Full Second-Life Engine flow → reuse / repair |
+| **Plastic Bottle** | Plastic | Repurpose or recycle |
+| **Old Clothes** | Textile | Reuse / donate, or repurpose if unwearable |
+| **Broken Chair** | Furniture | Repair (solid wood is highly repairable) |
+| **Phone Battery** | Batteries | Safety-first → authorised collection |
+| **Old Phone** | E-waste | Reuse / donate / repair |
+
+### The safety override
+
+A genuine hazard answer — **damaged battery, swelling, leaks, exposed wiring,
+burn marks, chemical smell** — forces **SAFE DISPOSAL** to the top and caps
+every other pathway below it. The recommendation card shows
+*"Safety override active"*.
+
+Caution flags that are **not** disposal triggers (e.g. furniture splinters)
+are handled separately, so a repairable chair is never sent to disposal.
+
+---
+
+## Waste categories supported
+
+E-waste · Batteries · Plastic · Paper/Cardboard · Glass · Metal · Textile ·
+Organic waste · Furniture · Appliances · Mixed/Unknown
+
+---
+
+## How the Second-Life Engine works
+
+1. Each item has a **base signal profile** (how strong each pathway looks from the image).
+2. Each category has its own **question bank** (electronics, textiles, furniture,
+   batteries, plastic, glass, paper, organic, metal, generic).
+3. Every answer applies **+/- weights** to the six pathways.
+4. Scores are clamped 0–100, ranked, and the top pathway becomes the recommendation.
+5. If a **hazard** answer was given, the safety override re-scores so disposal wins.
+6. Confidence blends the item's detection confidence with the winning margin.
+
+Because answers change the weights, the **same item gives different advice**
+depending on the user's situation — which is the whole point.
+
+---
+
+## Responsible AI
+
+- Every image-derived statement is labelled an **AI estimate**, never a physical inspection.
+- The UI states plainly that hidden internal damage, exact material composition,
+  true repairability and real-world recyclability **cannot** be determined from a photo.
+- Impact is reported as **behaviour** ("You identified a second-life pathway for 11 of 12 items"),
+  never invented kilograms or CO₂ figures.
+- **No DIY instructions** for batteries, electrical wiring, chemicals, medicines,
+  or hazardous materials — those route to authorised collection or professional guidance.
+- Campus figures are explicitly labelled **demonstration data**.
+
+---
+
+## Data & privacy
+
+Everything lives in one local file:
+
+```
+data/wastewise.db          # real SQLite database
+```
+
+Four tables: `users`, `sessions`, `waste_events`, `challenge_signups`.
+
+- Passwords: **scrypt** hash + 16-byte random salt per user
+- Login errors are deliberately vague ("Incorrect email or password") so the API
+  never reveals whether an email is registered
+- All history queries are scoped by `user_id` — enforced server-side, not in the UI
+- Deleting a user cascades to their sessions and history
+- `data/` is git-ignored, so databases never get committed
+
+---
+
+## API reference
+
+### Auth
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `POST` | `/api/auth/signup` | — | Create account → sets session cookie |
+| `POST` | `/api/auth/login` | — | Sign in → sets session cookie |
+| `POST` | `/api/auth/logout` | — | Destroy session |
+| `GET` | `/api/auth/me` | — | Current user, or `{ user: null }` |
+
+### Analysis (public)
 
 | Method | Path | Description |
-|--------|------|-------------|
+|---|---|---|
 | `GET` | `/api/health` | Service + mode status |
-| `GET` | `/api/demo-items` | 6 demo items + 11 waste categories |
+| `GET` | `/api/demo-items` | 6 demo items + 11 categories |
 | `GET` | `/api/categories` | Waste category list |
-| `POST` | `/api/analyze` | Analyse by `itemId` or `fileName` → detection result |
-| `POST` | `/api/recommend` | Second-Life Engine: `itemId` + `answers` → pathway + scores |
-| `GET` | `/api/items/:id` | Full analysis profile for an item |
-| `GET` | `/api/history` | Waste history (D1) |
-| `POST` | `/api/history` | Save a waste event (D1) |
-| `DELETE` | `/api/history/:id` | Delete a waste event (D1) |
-| `GET` | `/api/campus` | Campus challenge demo metrics |
-| `POST` | `/api/challenge` | Register a Campus Circularity Challenge (D1) |
+| `POST` | `/api/analyze` | `{ itemId }` or `{ fileName }` → detection result |
+| `POST` | `/api/recommend` | `{ itemId, answers }` → pathway + scores + reasoning |
+| `GET` | `/api/items/:id` | Full analysis profile for one item |
+| `GET` | `/api/campus` | Campus challenge metrics |
 
-**Example — dynamic recommendation:**
+### User data (requires sign-in)
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/history` | This account's waste history |
+| `POST` | `/api/history` | Save an event |
+| `DELETE` | `/api/history/:id` | Delete one event |
+| `DELETE` | `/api/history` | Clear this account's history |
+| `GET` | `/api/history/count` | Count for this account |
+| `POST` | `/api/challenge` | Register a Campus Circularity Challenge |
+
+**Example:**
 ```bash
 curl -X POST http://localhost:3000/api/recommend \
   -H 'Content-Type: application/json' \
@@ -55,91 +197,102 @@ curl -X POST http://localhost:3000/api/recommend \
 # → pathway: "reuse"
 ```
 
-## Currently Completed Features
+---
 
-- **Full 6-screen MVP** with working hash-based SPA navigation (`Home → Scan → Analysis → Second-Life → Plan → Impact`), plus History.
-- **Second-Life Engine** — item-specific contextual question banks (electronics, textiles, furniture, batteries, plastic, glass, paper, organic, metal, generic) that dynamically re-score the pathway. Live ladder + live score bars update without a page reload.
-- **Safety override** — a genuine hazard answer (damaged battery, leaks, swelling, exposed wiring) forces SAFE DISPOSAL to the top and caps every other pathway below it.
-- **Demo Mode** — 6 curated demo items (Old Laptop, Plastic Bottle, Old Clothes, Broken Chair, Phone Battery, Old Phone), each producing a different intelligent recommendation. Works with **zero external APIs**.
-- **Upload + drag & drop** with local file preview, plus keyword-based description matching.
-- **Action recording** — Mark as Reused / Repaired / Donated / Repurposed / Recycled / authorised collection → persisted to `localStorage` **and** Cloudflare D1.
-- **My Impact dashboard** — stat cards, doughnut + horizontal bar charts (Chart.js), waste-journey timeline, behaviour-based impact statement.
-- **WasteWise Campus Challenge** — participation metrics, team leaderboard, polar-area chart, challenge sign-up form.
-- **Dark / light mode** with persistence, mobile-responsive sidebar, toasts, and micro-interactions.
-- **Responsible-AI language throughout** — "Based on the image…", "AI estimate…", "Visible condition…", "Verify locally…". No DIY instructions for batteries, wiring, chemicals or hazardous materials.
-
-## Waste Categories Supported
-
-E-waste · Batteries · Plastic · Paper/Cardboard · Glass · Metal · Textile · Organic waste · Furniture · Appliances · Mixed/Unknown
-
-## Data Architecture
-
-- **Data models**: `waste_events` (item label, category, pathway, action, confidence, answers, created_at) and `challenge_signups` (org, contact, goal).
-- **Storage services**:
-  - **Cloudflare D1** (`DB` binding) — persistent waste history + challenge sign-ups (production source of truth).
-  - **Browser localStorage** — instant offline-safe mirror so history survives navigation and refresh.
-- **Data flow**: UI action → `localStorage` (immediate) → `POST /api/history` → D1 → merged back on load.
-- **Seed data**: 12 demo history records + campus demo metrics, clearly labelled as demonstration data.
-
-## User Guide
-
-1. Open the app and click **Scan an Item** (or **Describe an Item**).
-2. Upload a photo, drag & drop, type a description, or pick a **demo item**.
-3. Click **Analyze with AI** to see the detected item, category, visible condition (AI estimate) and safety notes.
-4. Continue to the **Second-Life Engine** and answer the contextual questions — the recommended pathway updates live.
-5. Click **Generate my action plan** to see "Your best next step", why it was chosen, next steps, safety considerations and an alternative.
-6. Mark the outcome (Reused / Repaired / Donated / Recycled) to save it to your history.
-7. Open **My Impact** to see your dashboard, or **Campus Challenge** to view the community leaderboard.
-8. Use the **moon / sun** icon to toggle dark mode.
-
-## Responsible AI Notes
-
-- Image analysis is an **AI estimate**, never a physical inspection.
-- Hidden internal damage, exact material composition, true repairability and local recyclability **cannot** be determined from an image.
-- Impact is reported as **behaviour** ("You identified a second-life pathway for 11 of 12 items") — never invented kilogram or CO₂ figures.
-- Campus figures are explicitly labelled **demonstration data**.
-
-## Tech Stack
-
-- **Hono** (edge web framework) on **Cloudflare Pages**
-- **Vite** build, TypeScript entry with JSX renderer
-- Vanilla-JS SPA frontend (no framework) served from `/static`
-- **Chart.js** + **Font Awesome** + **Plus Jakarta Sans / Inter** via CDN
-- **Cloudflare D1** for persistence
-
-## Project Structure
+## Project structure
 
 ```
-webapp/
-├── src/
-│   ├── index.tsx                # Hono app: page shell, API routes, static, SPA fallback
-│   └── lib/wastewise.js         # Categories, demo dataset, question banks, engines
+wastewise-ai/
+├── server/
+│   ├── index.mjs       # Hono app: auth, API routes, static + SPA serving
+│   ├── db.mjs          # SQLite schema & queries (better-sqlite3)
+│   ├── auth.mjs        # scrypt hashing, sessions, validation
+│   ├── wastewise.mjs   # Categories, demo dataset, question banks, engines
+│   └── reset.mjs       # `npm run reset-db`
 ├── public/
-│   ├── favicon.svg
+│   ├── index.html      # App shell + auth screen container
 │   └── static/
-│       ├── app.js               # SPA router, views, Second-Life Engine, charts
-│       ├── styles.css           # Design system, light/dark themes
+│       ├── app.js      # SPA router, auth UI, screens, charts, engine
+│       ├── styles.css  # Design system, light/dark themes
 │       └── favicon.svg
-├── migrations/0001_initial_schema.sql
-├── ecosystem.config.cjs         # PM2 (auto-detects configured D1)
-├── wrangler.jsonc
+├── data/               # SQLite database (auto-created, git-ignored)
+├── START-HERE.md       # Beginner VS Code setup guide
+├── README.md
 └── package.json
 ```
 
-## Deployment
+---
 
-- **Platform**: Cloudflare Pages
-- **Status**: Running locally (sandbox preview active)
-- **Build**: `npm run build` → `dist/_worker.js` (~54 kB, ~20 kB gzipped)
-- **Deploy**: `npm run deploy` (see the Deploy panel for the connected Cloudflare account)
-- **D1 migrations**: `npm run db:migrate:local` (local) / `npm run db:migrate:prod` (production)
-- **Last Updated**: 2026-10-03
+## Tech stack
 
-## Features Not Yet Implemented / Next Steps
+- **Node.js** + **Hono** (served via `@hono/node-server`)
+- **better-sqlite3** — local SQLite, no database server needed
+- **Node `crypto.scryptSync`** — password hashing, zero auth dependencies
+- **Vanilla JavaScript** SPA (no framework, no build step)
+- **Chart.js**, **Font Awesome**, **Plus Jakarta Sans / Inter** via CDN
 
-- Real vision-API integration (OpenAI / Gemini) behind the same `/api/analyze` contract; Demo Mode stays as the fallback.
-- Simple auth so history is per-user rather than per-browser.
-- Map integration for nearby repair cafés, donation centres and authorised e-waste/battery drop-offs.
-- Campus challenge backend (real per-team aggregation instead of demo metrics).
-- CSV/PDF export of personal impact and printable action plans.
-- Material-composition disclaimers driven by a verified recycling database per region.
+No bundler, no transpiler, no Cloudflare. Edit a file, refresh the browser.
+
+---
+
+## Commands
+
+| Command | Description |
+|---|---|
+| `npm install` | Install dependencies (once) |
+| `npm start` | Run at <http://localhost:3000> |
+| `npm run dev` | Run with auto-restart on file changes |
+| `npm run reset-db` | Delete the database (wipes accounts + history) |
+
+Run on a different port:
+
+```bash
+PORT=3001 npm start            # macOS / Linux
+$env:PORT=3001; npm start      # Windows PowerShell
+```
+
+---
+
+## Optional: real vision API
+
+Demo Mode is the default so the app always works offline. To wire in a real
+vision model, edit `POST /api/analyze` in `server/index.mjs` to call your
+provider when an API key is present, and fall back to `analyze()` when it isn't:
+
+```js
+// sketch — server-side only, never in the browser
+const key = process.env.OPENAI_API_KEY
+if (key && body.imageBase64) {
+  const ai = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ /* vision request */ }),
+  })
+  // …map the response onto the same shape `analyze()` returns
+}
+return c.json(analyze({ itemId: body.itemId, fileName: body.fileName }))
+```
+
+Keep the API key in `process.env` (or a `.env` file that is git-ignored) — never
+in `public/static/app.js`, which the browser can read.
+
+---
+
+## Features not yet implemented / next steps
+
+- Real vision-API integration behind the existing `/api/analyze` contract
+- Password reset / email verification
+- Map integration for nearby repair cafés, donation centres, e-waste drop-offs
+- True multi-tenant campus aggregation (leaderboard is demo data today)
+- CSV / PDF export of personal impact and printable action plans
+- Region-aware recycling rules from a verified database
+
+---
+
+## Status
+
+- **Platform:** Local Node.js (no cloud dependency)
+- **Verified:** 47/47 end-to-end checks passing — signup, validation, session,
+  login, logout, per-user isolation, scan → analysis → questions → plan →
+  save → impact → campus → history delete → dark mode
+- **Last updated:** 2026-10-15
